@@ -1,0 +1,12 @@
+[workspace]
+authors = ["Mikkel Roald-Arbøl <github.ggb9a@simplelogin.co>"]
+channels = ["conda-forge"]
+name = "boris-fix-corrupt"
+platforms = ["osx-64"]
+version = "0.1.0"
+
+[tasks]
+recover-boris = { cmd = "python boris-recover.py {{ csv_path }}", args = ["csv_path"] }
+
+[dependencies]
+python = ">=3.14.2,<3.15"
