@@ -7,3 +7,10 @@ We had a `.boris` project file corrupted in the lab - completely empty. But we h
 3. From the command-line (Powershell on Windows), move to the folder where you saved `boris-recovery.py` file (*e.g.* `cd PATH/TO/SCRIPT`)
 4. From there, run `python boris-recovery.py path/to/your/csv/file.csv` 
 5. You should now have a fully functional `.boris` file next to the `.csv` file!
+
+## Alternative with Pixi
+If you have Pixi installed, you can simply clone this repository:
+1. From the command line, move to where you want this folder to end up
+2. Run `git clone https://github.com/roaldarbol/boris-recovery.git`
+3. Run `pixi run recover-boris path/to/your/csv/file.csv`
+4. You should now have a fully functional `.boris` file next to the `.csv` file!
