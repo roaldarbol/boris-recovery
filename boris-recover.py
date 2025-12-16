@@ -5,6 +5,7 @@ Restore a BORIS project file from a CSV export.
 Usage:
     boris-recover path/to/exported.csv
     
+Automatically detects whether the CSV is a standard or aggregated export.
 Outputs a .boris file in the same directory with the same base name.
 """
 
@@ -17,30 +18,8 @@ from collections import defaultdict
 from pathlib import Path
 
 
-def restore_boris(csv_path: Path) -> Path:
-    """Convert a BORIS CSV export back to a .boris project file."""
-    
-    # Determine output path
-    output_path = csv_path.with_suffix('.boris')
-    
-    # Read CSV
-    with open(csv_path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-    
-    if not rows:
-        print("Error: CSV file is empty.", file=sys.stderr)
-        sys.exit(1)
-    
-    # Extract metadata from first row
-    obs_id = rows[0]['Observation id']
-    obs_date = rows[0]['Observation date']
-    media_duration = float(rows[0]['Media duration (s)'])
-    fps = float(rows[0]['FPS'])
-    media_file = rows[0]['Media file name']
-    
-    # Get unique subjects
-    subjects = list(set(row['Subject'] for row in rows))
+def parse_standard_csv(rows, fps):
+    """Parse standard (non-aggregated) BORIS CSV export."""
     
     # Analyze behaviors
     behavior_info = defaultdict(lambda: {'types': set(), 'category': None, 'modifiers': set()})
@@ -48,10 +27,192 @@ def restore_boris(csv_path: Path) -> Path:
         beh = row['Behavior']
         behavior_info[beh]['types'].add(row['Behavior type'])
         behavior_info[beh]['category'] = row['Behavioral category']
-        mod = row['Modifier #1']
+        mod = row.get('Modifier #1', '')
         if mod and mod.strip():
             for m in mod.split(','):
                 behavior_info[beh]['modifiers'].add(m.strip())
+    
+    # Build events list [time, subject, behavior, modifier, comment, frame_index]
+    events_list = []
+    for row in rows:
+        time_val = float(row['Time'])
+        subject = row['Subject']
+        behavior = row['Behavior']
+        modifier = row.get('Modifier #1', '')
+        modifier = modifier if modifier and modifier.strip() else ""
+        comment = row.get('Comment', '')
+        comment = comment if comment and comment != 'NA' else ""
+        
+        try:
+            frame_idx = int(row['Image index'])
+        except (ValueError, KeyError):
+            frame_idx = int(time_val * fps)
+        
+        events_list.append([time_val, subject, behavior, modifier, comment, frame_idx])
+    
+    return behavior_info, events_list
+
+
+def parse_aggregated_csv(rows, fps):
+    """Parse aggregated BORIS CSV export."""
+    
+    # Aggregated format has: Start, Stop, Duration columns instead of Time + Behavior type
+    # State events have start and stop times
+    # Point events have same start/stop time (duration = 0 or near 0)
+    
+    def parse_number(val):
+        if val is None:
+            return 0.0
+        val = val.strip()
+        if val.count('.') > 1:
+            parts = val.rsplit('.', 1)
+            val = parts[0].replace('.', '') + '.' + parts[1]
+        return float(val.replace(',', '.'))
+    
+    behavior_info = defaultdict(lambda: {'types': set(), 'category': None, 'modifiers': set()})
+    events_list = []
+    
+    for row in rows:
+        beh = row['Behavior']
+        category = row.get('Behavioral category', '')
+        behavior_info[beh]['category'] = category
+        
+        # Get modifier - could be in different columns
+        modifier = ''
+        for key in row.keys():
+            if key.startswith('Modifier'):
+                mod_val = row[key]
+                if mod_val and mod_val.strip():
+                    modifier = mod_val.strip()
+                    for m in modifier.split(','):
+                        behavior_info[beh]['modifiers'].add(m.strip())
+                    break
+        
+        subject = row['Subject']
+        
+        # Handle both Comment and Comment start columns
+        comment = row.get('Comment', '') or row.get('Comment start', '')
+        comment = comment if comment and comment != 'NA' else ""
+        
+        start_time = parse_number(row['Start (s)'])
+        stop_time = parse_number(row['Stop (s)'])
+        
+        # Check Behavior type if available, otherwise infer from duration
+        beh_type = row.get('Behavior type', '').upper()
+        
+        if beh_type == 'POINT' or (beh_type == '' and abs(stop_time - start_time) < 0.001):
+            # Point event
+            behavior_info[beh]['types'].add('POINT')
+            frame_idx = int(start_time * fps)
+            events_list.append([start_time, subject, beh, modifier, comment, frame_idx])
+        else:
+            # State event
+            behavior_info[beh]['types'].add('STATE')
+            
+            # Create START event
+            start_frame = int(start_time * fps)
+            events_list.append([start_time, subject, beh, modifier, comment, start_frame])
+            
+            # Create STOP event
+            stop_frame = int(stop_time * fps)
+            events_list.append([stop_time, subject, beh, "", "", stop_frame])
+    
+    return behavior_info, events_list
+
+
+def detect_delimiter(csv_path: Path) -> str:
+    """Detect the delimiter used in the CSV file."""
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        first_line = f.readline()
+    
+    # Count potential delimiters
+    semicolons = first_line.count(';')
+    commas = first_line.count(',')
+    
+    return ';' if semicolons > commas else ','
+
+
+def get_column(row, *possible_names, default=None):
+    """Get a value from a row, trying multiple possible column names."""
+    for name in possible_names:
+        if name in row and row[name]:
+            return row[name]
+    return default
+
+
+def detect_csv_format(rows):
+    """Auto-detect whether CSV is standard or aggregated export."""
+    if not rows:
+        return None
+    
+    columns = set(rows[0].keys())
+    
+    # Aggregated exports have Start (s) and Stop (s) columns
+    if 'Start (s)' in columns and 'Stop (s)' in columns:
+        return 'aggregated'
+    
+    # Standard exports have Time and Behavior type columns
+    if 'Time' in columns and 'Behavior type' in columns:
+        return 'standard'
+    
+    return None
+
+
+def restore_boris(csv_path: Path) -> Path:
+    """Convert a BORIS CSV export back to a .boris project file."""
+    
+    # Determine output path
+    output_path = csv_path.with_suffix('.boris')
+    
+    # Detect delimiter and read CSV
+    delimiter = detect_delimiter(csv_path)
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f, delimiter=delimiter)
+        rows = list(reader)
+    
+    if not rows:
+        print("Error: CSV file is empty.", file=sys.stderr)
+        sys.exit(1)
+    
+    # Auto-detect format
+    csv_format = detect_csv_format(rows)
+    if csv_format is None:
+        print("Error: Could not detect CSV format.", file=sys.stderr)
+        print("Expected either standard export (with 'Time', 'Behavior type' columns)", file=sys.stderr)
+        print("or aggregated export (with 'Start (s)', 'Stop (s)' columns).", file=sys.stderr)
+        sys.exit(1)
+    
+    print(f"Detected format: {csv_format}", file=sys.stderr)
+    
+    # Extract metadata from first row (handle column name variations)
+    first_row = rows[0]
+    obs_id = first_row['Observation id']
+    obs_date = first_row['Observation date']
+    
+    # Handle European number format (e.g., "64.242.400" should be "64242.400")
+    def parse_number(val):
+        if val is None:
+            return 0.0
+        val = val.strip()
+        # Count periods - if more than one, it's European format with thousand separators
+        if val.count('.') > 1:
+            # Remove thousand separators, keep last period as decimal
+            parts = val.rsplit('.', 1)
+            val = parts[0].replace('.', '') + '.' + parts[1]
+        return float(val.replace(',', '.'))
+    
+    media_duration = parse_number(get_column(first_row, 'Media duration (s)'))
+    fps = parse_number(get_column(first_row, 'FPS', 'FPS (frame/s)', default='30'))
+    media_file = first_row['Media file name']
+    
+    # Get unique subjects
+    subjects = list(set(row['Subject'] for row in rows))
+    
+    # Parse events based on format
+    if csv_format == 'aggregated':
+        behavior_info, events_list = parse_aggregated_csv(rows, fps)
+    else:
+        behavior_info, events_list = parse_standard_csv(rows, fps)
     
     # Build subjects configuration
     subjects_conf = {}
@@ -65,11 +226,11 @@ def restore_boris(csv_path: Path) -> Path:
     # Build behaviors configuration
     behaviors_conf = {}
     all_behaviors = sorted(behavior_info.keys())
-    all_categories = list(set(info['category'] for info in behavior_info.values()))
+    all_categories = list(set(info['category'] for info in behavior_info.values() if info['category']))
     
     for i, beh in enumerate(all_behaviors):
         info = behavior_info[beh]
-        is_state = 'START' in info['types'] or 'STOP' in info['types']
+        is_state = 'START' in info['types'] or 'STOP' in info['types'] or 'STATE' in info['types']
         
         modifiers = ""
         if info['modifiers']:
@@ -89,27 +250,11 @@ def restore_boris(csv_path: Path) -> Path:
             "code": beh,
             "description": "",
             "color": "#aaaaaa",
-            "category": info['category'],
+            "category": info['category'] or "",
             "modifiers": modifiers,
             "excluded": "",
             "coding map": ""
         }
-    
-    # Build events list [time, subject, behavior, modifier, comment, frame_index]
-    events_list = []
-    for row in rows:
-        time_val = float(row['Time'])
-        subject = row['Subject']
-        behavior = row['Behavior']
-        modifier = row['Modifier #1'] if row['Modifier #1'] and row['Modifier #1'].strip() else ""
-        comment = row['Comment'] if row['Comment'] and row['Comment'] != 'NA' else ""
-        
-        try:
-            frame_idx = int(row['Image index'])
-        except (ValueError, KeyError):
-            frame_idx = int(time_val * fps)
-        
-        events_list.append([time_val, subject, behavior, modifier, comment, frame_idx])
     
     events_list.sort(key=lambda x: x[0])
     
