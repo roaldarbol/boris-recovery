@@ -1,5 +1,5 @@
 # Recover BORIS project file
-We had a `.boris` project file corrupted in the lab - completely empty. But we had a `.csv` file with all the events from the project, so we decided to try and recover the lost project file as all the data was still there. And this is the result, a Python script - we successfully recovered the BORIS project file!
+We had a `.boris` project file corrupted in the lab - completely empty. But we had a `.csv` file with all the events from the project, so we decided to try and recover the lost project file as all the data was still there. And this is the result, a Python script - we successfully recovered the BORIS project file! The script automatically detects whether it is a standard events export or an aggregated events export.
 
 # User guide
 1. Ensure you have a working Python installation.
